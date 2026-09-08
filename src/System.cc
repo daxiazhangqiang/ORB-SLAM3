@@ -38,6 +38,86 @@ namespace ORB_SLAM3
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
+void System::SaveMapPointsPLY(const string &filename)
+{
+    cout << "Saving map points to " << filename << " ..." << endl;
+
+    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+
+    // 先一次性收集所有有效地图点坐标，保证头部声明数量与实际写入数量完全一致
+    vector<Eigen::Vector3f> vPoints;
+    for(Map* pMap : vpMaps)
+    {
+        vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
+        for(MapPoint* pMP : vpMPs)
+            if(!pMP->isBad())
+                vPoints.push_back(pMP->GetWorldPos());
+    }
+
+    ofstream f(filename.c_str());
+    if(!f.is_open())
+    {
+        cerr << "ERROR: could not open " << filename << endl;
+        return;
+    }
+    f << fixed << setprecision(9);
+    f << "ply" << endl;
+    f << "format ascii 1.0" << endl;
+    f << "comment ORB-SLAM3 map points (exported for CloudCompare/MeshLab)" << endl;
+    f << "element vertex " << vPoints.size() << endl;
+    f << "property float x" << endl;
+    f << "property float y" << endl;
+    f << "property float z" << endl;
+    f << "property uchar red" << endl;
+    f << "property uchar green" << endl;
+    f << "property uchar blue" << endl;
+    f << "end_header" << endl;
+
+    for(const Eigen::Vector3f& pos : vPoints)
+        f << pos(0) << " " << pos(1) << " " << pos(2) << " 0 255 0" << endl;
+
+    f.close();
+    cout << "Saved " << vPoints.size() << " map points to " << filename << endl;
+}
+
+void System::SaveKeyFramesPLY(const string &filename)
+{
+    cout << "Saving keyframes to " << filename << " ..." << endl;
+
+    vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
+
+    // 先一次性收集所有有效关键帧相机中心，保证头部声明数量与实际写入数量一致
+    vector<Eigen::Vector3f> vCenters;
+    for(KeyFrame* pKF : vpKFs)
+        if(!pKF->isBad())
+            vCenters.push_back(pKF->GetCameraCenter());
+
+    ofstream f(filename.c_str());
+    if(!f.is_open())
+    {
+        cerr << "ERROR: could not open " << filename << endl;
+        return;
+    }
+    f << fixed << setprecision(9);
+    f << "ply" << endl;
+    f << "format ascii 1.0" << endl;
+    f << "comment ORB-SLAM3 keyframe camera centers" << endl;
+    f << "element vertex " << vCenters.size() << endl;
+    f << "property float x" << endl;
+    f << "property float y" << endl;
+    f << "property float z" << endl;
+    f << "property uchar red" << endl;
+    f << "property uchar green" << endl;
+    f << "property uchar blue" << endl;
+    f << "end_header" << endl;
+
+    for(const Eigen::Vector3f& c : vCenters)
+        f << c(0) << " " << c(1) << " " << c(2) << " 255 0 0" << endl;
+
+    f.close();
+    cout << "Saved " << vCenters.size() << " keyframes to " << filename << endl;
+}
+
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),

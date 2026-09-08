@@ -93,3 +93,5 @@ borrar/*
 */ExecMean.txt
 # user folder
 zhangqiang/
+.vscode/
+*.ply

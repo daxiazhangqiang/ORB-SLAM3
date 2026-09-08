@@ -23,6 +23,7 @@
 #include<chrono>
 #include <ctime>
 #include <sstream>
+#include <unistd.h>
 
 #include<opencv2/core/core.hpp>
 
@@ -246,7 +247,21 @@ int main(int argc, char *argv[])
         SLAM.SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
     }
 
-    return 0;
+    // 导出地图点云和关键帧位姿为 PLY（可用 CloudCompare / MeshLab 查看）
+    if (bFileName)
+    {
+        SLAM.SaveMapPointsPLY(string(argv[argc-1]) + "_map_points.ply");
+        SLAM.SaveKeyFramesPLY(string(argv[argc-1]) + "_keyframes.ply");
+    }
+    else
+    {
+        SLAM.SaveMapPointsPLY("map_points.ply");
+        SLAM.SaveKeyFramesPLY("keyframes.ply");
+    }
+
+    // 所有结果已保存完毕，用 _exit 直接退出，避免 System 对象析构时触发段错误
+    // （该段错误发生在退出阶段，不影响已保存的轨迹和 PLY 文件）
+    _exit(0);
 }
 
 void LoadImages(const string &strImagePath, const string &strPathTimes,

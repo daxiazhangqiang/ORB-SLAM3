@@ -158,6 +158,11 @@ public:
     void SaveTrajectoryEuRoC(const string &filename, Map* pMap);
     void SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap);
 
+    // Save map points / keyframe camera centers as PLY point clouds,
+    // for inspection with CloudCompare / MeshLab. Call first Shutdown().
+    void SaveMapPointsPLY(const string &filename);
+    void SaveKeyFramesPLY(const string &filename);
+
     // Save data used for initialization debug
     void SaveDebugData(const int &iniIdx);
 
