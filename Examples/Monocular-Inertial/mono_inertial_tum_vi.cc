@@ -116,7 +116,9 @@ int main(int argc, char **argv)
     cout << "IMU data in the sequence: " << nImu << endl << endl;*/
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, true, 0, file_name);
+    // 默认开可视化窗口；批量做离线实验时用 ORB_SLAM3_NO_VIEWER=1 关掉（不渲染，更快）
+    bool bUseViewer = (getenv("ORB_SLAM3_NO_VIEWER") == nullptr);
+    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::IMU_MONOCULAR, bUseViewer, 0, file_name);
     float imageScale = SLAM.GetImageScale();
 
     double t_resize = 0.f;
@@ -257,11 +259,19 @@ int main(int argc, char **argv)
         const string f_file =  "f_" + string(argv[argc-1]) + ".txt";
         SLAM.SaveTrajectoryEuRoC(f_file);
         SLAM.SaveKeyFrameTrajectoryEuRoC(kf_file);
+
+        // 导出地图点云与关键帧位置为 PLY（CloudCompare / MeshLab 可直接打开）。
+        // 与 mono_inertial_euroc.cc 的做法一致：空地图时只会写出 0 个顶点的空文件，
+        // 不会崩（SaveMapPointsPLY/SaveKeyFramesPLY 内部都做了 isBad() 过滤）。
+        SLAM.SaveMapPointsPLY(string(argv[argc-1]) + "_map_points.ply");
+        SLAM.SaveKeyFramesPLY(string(argv[argc-1]) + "_keyframes.ply");
     }
     else
     {
         SLAM.SaveTrajectoryEuRoC("CameraTrajectory.txt");
         SLAM.SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
+        SLAM.SaveMapPointsPLY("map_points.ply");
+        SLAM.SaveKeyFramesPLY("keyframes.ply");
     }
 
     sort(vTimesTrack.begin(),vTimesTrack.end());

@@ -85,6 +85,9 @@ namespace ORB_SLAM3 {
         bool needToRectify() {return bNeedToRectify_;}
 
         float noiseGyro() {return noiseGyro_;}
+        // 可选的 IMU 零偏先验（来自 yaml 的 IMU.AccBias / IMU.GyroBias；不填就是 0）
+        Eigen::Vector3f imuAccBias() {return imuAccBias_;}
+        Eigen::Vector3f imuGyroBias() {return imuGyroBias_;}
         float noiseAcc() {return noiseAcc_;}
         float gyroWalk() {return gyroWalk_;}
         float accWalk() {return accWalk_;}
@@ -189,6 +192,8 @@ namespace ORB_SLAM3 {
          */
         float noiseGyro_, noiseAcc_;
         float gyroWalk_, accWalk_;
+        Eigen::Vector3f imuAccBias_ = Eigen::Vector3f::Zero();
+        Eigen::Vector3f imuGyroBias_ = Eigen::Vector3f::Zero();
         float imuFrequency_;
         Sophus::SE3f Tbc_;
         bool insertKFsWhenLost_;

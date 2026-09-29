@@ -419,6 +419,14 @@ namespace ORB_SLAM3 {
         accWalk_ = readParameter<float>(fSettings,"IMU.AccWalk",found);
         imuFrequency_ = readParameter<float>(fSettings,"IMU.Frequency",found);
 
+        // 可选的零偏先验：不填时保持 0（行为与原来完全一致）
+        cv::Mat cvAccBias = readParameter<cv::Mat>(fSettings,"IMU.AccBias",found,false);
+        if(found && cvAccBias.total() == 3)
+            imuAccBias_ = Converter::toVector3f(cvAccBias);
+        cv::Mat cvGyroBias = readParameter<cv::Mat>(fSettings,"IMU.GyroBias",found,false);
+        if(found && cvGyroBias.total() == 3)
+            imuGyroBias_ = Converter::toVector3f(cvGyroBias);
+
         cv::Mat cvTbc = readParameter<cv::Mat>(fSettings,"IMU.T_b_c1",found);
         Tbc_ = Converter::toSophus(cvTbc);
 

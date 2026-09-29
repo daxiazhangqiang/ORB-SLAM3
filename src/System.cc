@@ -389,8 +389,11 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     }
 
     if (mSensor == System::IMU_STEREO)
-        for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
-            mpTracker->GrabImuData(vImuMeas[i_imu]);
+    {
+        vector<IMU::Point> vImu = ApplyImuBias(vImuMeas);
+        for(size_t i_imu = 0; i_imu < vImu.size(); i_imu++)
+            mpTracker->GrabImuData(vImu[i_imu]);
+    }
 
     // std::cout << "start GrabImageStereo" << std::endl;
     Sophus::SE3f Tcw = mpTracker->GrabImageStereo(imLeftToFeed,imRightToFeed,timestamp,filename);
@@ -464,8 +467,11 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
     }
 
     if (mSensor == System::IMU_RGBD)
-        for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
-            mpTracker->GrabImuData(vImuMeas[i_imu]);
+    {
+        vector<IMU::Point> vImu = ApplyImuBias(vImuMeas);
+        for(size_t i_imu = 0; i_imu < vImu.size(); i_imu++)
+            mpTracker->GrabImuData(vImu[i_imu]);
+    }
 
     Sophus::SE3f Tcw = mpTracker->GrabImageRGBD(imToFeed,imDepthToFeed,timestamp,filename);
 
@@ -540,8 +546,11 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
     }
 
     if (mSensor == System::IMU_MONOCULAR)
-        for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
-            mpTracker->GrabImuData(vImuMeas[i_imu]);
+    {
+        vector<IMU::Point> vImu = ApplyImuBias(vImuMeas);
+        for(size_t i_imu = 0; i_imu < vImu.size(); i_imu++)
+            mpTracker->GrabImuData(vImu[i_imu]);
+    }
 
     Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename);
 
@@ -592,10 +601,52 @@ void System::ResetActiveMap()
     mbResetActiveMap = true;
 }
 
+namespace {
+
+// 有界等待 + join 一个后台线程。
+// 目的：不要用"退出时挂死"换掉"退出时崩溃"，所以两种情况特意**不** join：
+//   ① 调用者本身就是这个线程 —— viewer 菜单里的 Stop 按钮会从 viewer 线程调用
+//      System::Shutdown()（src/Viewer.cc），此时 join 自己会抛 system_error 并 terminate；
+//   ② 超时内还没结束 —— 例如 LoopClosing 正卡在一次 FullInertialBA 里（上游注释里
+//      也留了 "isRunningGBA → break anyway" 的同类处理）。
+// 这两种情况下线程保持原样，由进程退出时统一回收，与改动前的行为一致。
+template <typename TThreadOwner>
+void JoinThreadBounded(std::thread* pThread, TThreadOwner* pOwner,
+                       const char* name, int timeout_ms)
+{
+    if(!pThread || !pOwner)
+        return;
+
+    if(pThread->get_id() == std::this_thread::get_id())   // ① 不能 join 自己
+        return;
+
+    int waited_ms = 0;
+    while(waited_ms < timeout_ms && !pOwner->isFinished())
+    {
+        usleep(5000);
+        waited_ms += 5;
+    }
+
+    if(pOwner->isFinished())
+    {
+        if(pThread->joinable())
+            pThread->join();
+    }
+    else                                                  // ② 等不到就不等，别把退出变成挂死
+    {
+        cout << "[i] " << name << " thread is still running after "
+             << timeout_ms << " ms; leaving it to process teardown." << endl;
+    }
+}
+
+} // namespace
+
 void System::Shutdown()
 {
     {
         unique_lock<mutex> lock(mMutexReset);
+        if(mbShutDown)      // 幂等：示例会显式调一次，~System() 之后还会再调一次
+            return;
         mbShutDown = true;
     }
 
@@ -603,27 +654,13 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
-    {
-        mpViewer->RequestFinish();
-        while(!mpViewer->isFinished())
-            usleep(5000);
-    }*/
 
-    // Wait until all thread have effectively stopped
-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
-    {
-        if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;*/
-        /*if(!mpLoopCloser->isFinished())
-            cout << "mpLoopCloser is not finished" << endl;
-        if(mpLoopCloser->isRunningGBA()){
-            cout << "mpLoopCloser is running GBA" << endl;
-            cout << "break anyway..." << endl;
-            break;
-        }*/
-        /*usleep(5000);
-    }*/
+    // viewer 也必须停。它每帧都在 cv::waitKey() 里泵 Qt 事件循环、重绘 OpenCV 窗口，
+    // 而 main() 返回后的 exit() 会卸载动态库并析构 Qt/GL 的全局状态；两者并发就是
+    // 2026-09-29 抓到的退出崩溃（viewer 线程在 QBrush::QBrush()，主线程在 dlclose）。
+    // 上游把这段注释掉了，于是 viewer 线程会一直活到进程被拆掉为止。
+    if(mpViewer)
+        mpViewer->RequestFinish();
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -631,14 +668,28 @@ void System::Shutdown()
         SaveAtlas(FileType::BINARY_FILE);
     }
 
-    /*if(mpViewer)
-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
+    // 有界等待 + join：viewer 一帧的周期是 mT = 1000/fps ≈ 33 ms，通常几十毫秒就返回；
+    // LocalMapping / LoopClosing 可能要等一次 BA 收尾，超时就不再等（见 JoinThreadBounded）。
+    JoinThreadBounded(mptViewer,       mpViewer,       "Viewer",       2000);
+    JoinThreadBounded(mptLocalMapping, mpLocalMapper, "LocalMapping", 5000);
+    JoinThreadBounded(mptLoopClosing,  mpLoopCloser,  "LoopClosing",  5000);
 
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
 #endif
 
 
+}
+
+System::~System()
+{
+    // RAII 兜底：调用者（示例、以及以后要写的 ROS2 节点）忘记显式 Shutdown() 时，
+    // 也不能让后台线程在进程拆台时继续跑。
+    //
+    // 这里只"停线程 + join"，刻意不 delete mpTracker / mpAtlas / ...：退出阶段真正的
+    // 风险是"边拆对象边有线程在用"，而不是内存没还 —— 进程马上结束，未释放的内存由内核
+    // 回收，代价为零；反过来 delete 会把线程间交叉引用、GL 上下文归属这些所有权问题引进来。
+    Shutdown();
 }
 
 bool System::isShutDown() {
@@ -706,6 +757,26 @@ void System::SaveTrajectoryTUM(const string &filename)
     // cout << endl << "trajectory saved!" << endl;
 }
 
+std::vector<IMU::Point> System::ApplyImuBias(const std::vector<IMU::Point>& vImuMeas)
+{
+    // 把 yaml 里的 IMU.AccBias / IMU.GyroBias（常数零偏**先验**）从测量里扣掉。
+    // 不填这两个字段时是零向量 → 原样返回，行为与原生 ORB-SLAM3 完全一致。
+    // 注意：这只是先验；算法内部对零偏的随机游走建模与在线估计照旧。
+    if(!settings_)
+        return vImuMeas;
+    const Eigen::Vector3f ba = settings_->imuAccBias();
+    const Eigen::Vector3f bg = settings_->imuGyroBias();
+    if(ba.isZero(0.0f) && bg.isZero(0.0f))
+        return vImuMeas;
+
+    std::vector<IMU::Point> vOut;
+    vOut.reserve(vImuMeas.size());
+    for(const IMU::Point& p : vImuMeas)
+        vOut.emplace_back(IMU::Point(p.a.x()-ba.x(), p.a.y()-ba.y(), p.a.z()-ba.z(),
+                                     p.w.x()-bg.x(), p.w.y()-bg.y(), p.w.z()-bg.z(), p.t));
+    return vOut;
+}
+
 void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 {
     cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
@@ -751,7 +822,7 @@ void System::SaveTrajectoryEuRoC(const string &filename)
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     int numMaxKFs = 0;
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
     for(Map* pMap :vpMaps)
     {
@@ -761,6 +832,14 @@ void System::SaveTrajectoryEuRoC(const string &filename)
             numMaxKFs = pMap->GetAllKeyFrames().size();
             pBiggerMap = pMap;
         }
+    }
+
+    // 所有地图都是 0 个关键帧时（例如惯性初始化从未成功），pBiggerMap 从未被赋值。
+    // 原来这里直接用 pBiggerMap->GetAllKeyFrames()，会解引用未初始化指针 → SIGSEGV。
+    if(!pBiggerMap || numMaxKFs == 0)
+    {
+        std::cout << "[i] No map has any keyframe (initialization never succeeded) - no trajectory to save." << std::endl;
+        return;
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
@@ -972,7 +1051,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     }
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     int numMaxKFs = 0;
     for(Map* pMap :vpMaps)
     {
@@ -981,6 +1060,12 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
             numMaxKFs = pMap->GetAllKeyFrames().size();
             pBiggerMap = pMap;
         }
+    }
+
+    if(!pBiggerMap || numMaxKFs == 0)   // 同 SaveTrajectoryEuRoC：空地图时别解引用空/未初始化指针
+    {
+        std::cout << "[i] No map has any keyframe - no keyframe trajectory to save." << std::endl;
+        return;
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
@@ -1087,7 +1172,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;
     int numMaxKFs = 0;
     for(Map* pMap :vpMaps)
     {
@@ -1096,6 +1181,12 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
             numMaxKFs = pMap->GetAllKeyFrames().size();
             pBiggerMap = pMap;
         }
+    }
+
+    if(!pBiggerMap || numMaxKFs == 0)   // 同 SaveTrajectoryEuRoC：空地图时别解引用空/未初始化指针
+    {
+        std::cout << "[i] No map has any keyframe - no trajectory to save." << std::endl;
+        return;
     }
 
     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
@@ -1139,7 +1230,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
     cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
-    Map* pBiggerMap;
+    Map* pBiggerMap = nullptr;   // 下面的 if(!pBiggerMap) 只有先初始化才可靠
     int numMaxKFs = 0;
     for(Map* pMap :vpMaps)
     {
@@ -1626,4 +1717,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

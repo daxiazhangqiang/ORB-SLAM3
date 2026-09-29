@@ -26,6 +26,7 @@
 
 #include<mutex>
 #include<chrono>
+#include<cstdlib>
 
 namespace ORB_SLAM3
 {
@@ -1188,7 +1189,6 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         nMinKF = 10;
     }
 
-
     if(mpAtlas->KeyFramesInMap()<nMinKF)
         return;
 
@@ -1267,6 +1267,67 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     Optimizer::InertialOptimization(mpAtlas->GetCurrentMap(), mRwg, mScale, mbg, mba, mbMonocular, infoInertial, false, false, priorG, priorA);
 
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+
+    // 诊断开关（仅当环境变量 ORB_SLAM3_DBG_INIT=1 时输出，不影响正常运行）
+    // 用 ./zhangqiang/markdowns/IMU_issue.md 里的排查步骤时打开它。
+    if(getenv("ORB_SLAM3_DBG_INIT"))
+    {
+        float dmax = 0.f, dsum = 0.f;
+        int nd = 0;
+        // 窗口内的「比力」均值：Σ(R_wb·ΔV) / Σdt，理想值 = 9.81 m/s²。
+        // 它和 9.81 的差 ≈ 残余加计零偏在重力方向上的投影，也是 ORB-SLAM3 硬编码
+        // 常量 g 与实际测量之间的不自洽程度。
+        Eigen::Vector3d gVecSum = Eigen::Vector3d::Zero();
+        double dtSum = 0.0;
+        for(size_t i=1; i<vpKF.size(); i++)
+        {
+            if(!vpKF[i]->mPrevKF) continue;
+            float d = (vpKF[i]->GetCameraCenter()-vpKF[i]->mPrevKF->GetCameraCenter()).norm();
+            dsum += d; nd++;
+            if(d>dmax) dmax = d;
+            if(vpKF[i]->mpImuPreintegrated)
+            {
+                gVecSum += vpKF[i]->mPrevKF->GetImuRotation().cast<double>()
+                           * vpKF[i]->mpImuPreintegrated->GetUpdatedDeltaVelocity().cast<double>();
+                dtSum += vpKF[i]->mpImuPreintegrated->dT;
+            }
+        }
+        // 重力方向偏差：优化器最后认定的重力方向（map 系，Rwg·(0,0,-1)）
+        // 与「加计预积分实测的重力方向」之间的夹角。Rwg 的初值就是按实测方向构造的，
+        // 所以这个角里 >0 的部分，就是优化器为了让惯性残差变小而把（残余）加计零偏
+        // 「吸收」进重力方向、即把重力方向转走的量。
+        // 注意：实测方向这里**每轮都重算**（VIBA1/2 时 map 已被转过一次，两个量仍在同一 map 系里）。
+        Eigen::Vector3d gRefSum = Eigen::Vector3d::Zero();
+        size_t nRef = 0;
+        for(size_t i=0; i<vpKF.size(); i++)
+        {
+            if(!vpKF[i]->mPrevKF || !vpKF[i]->mpImuPreintegrated) continue;
+            gRefSum -= vpKF[i]->mPrevKF->GetImuRotation().cast<double>()
+                       * vpKF[i]->mpImuPreintegrated->GetUpdatedDeltaVelocity().cast<double>();
+            nRef++;
+        }
+        double gAngDeg = -1.0;
+        if(nRef > 0 && gRefSum.norm() > 1e-6)
+        {
+            Eigen::Vector3d gRef = gRefSum.normalized();
+            Eigen::Vector3d gOpt = mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+            gOpt.normalize();
+            double c = gOpt.dot(gRef);
+            c = std::max(-1.0, std::min(1.0, c));
+            gAngDeg = acos(c)*180.0/M_PI;
+        }
+        const char* phase = mpCurrentKeyFrame->GetMap()->GetIniertialBA2() ? "VIBA2"
+                          : (mpCurrentKeyFrame->GetMap()->GetIniertialBA1() ? "VIBA1" : "init0");
+        cout << "[DBG-INIT] N=" << N
+             << " phase=" << phase
+             << " span=" << (vpKF.back()->mTimeStamp-vpKF.front()->mTimeStamp)
+             << " scale=" << mScale << " mTinit=" << mTinit
+             << " KFdist_mean=" << (nd? dsum/nd : 0.f) << " KFdist_max=" << dmax
+             << " gAng=" << gAngDeg << "deg"
+             << " gEst=" << (dtSum>0.0? gVecSum.norm()/dtSum : 0.0)
+             << " bg=" << mbg.transpose() << " |bg|=" << mbg.norm()
+             << " ba=" << mba.transpose() << " |ba|=" << mba.norm() << endl;
+    }
 
     if (mScale<1e-1)
     {

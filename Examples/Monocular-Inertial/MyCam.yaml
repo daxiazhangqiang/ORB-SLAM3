@@ -1,0 +1,116 @@
+%YAML:1.0
+
+# 本文件由 VI_SLAM.md 阶段 5（第 8 步）生成，2026-09-18。
+# 数据来源：
+#   相机内参 / 畸变：calib/cam_run2-camchain.yaml（Kalibr 相机内参标定，重新确认过的 run2）
+#   外参 T_b_c1：calib/full-camchain-imucam.yaml 的 T_cam_imu 求逆（= results 里的 T_ic）
+#   IMU 噪声：calib/imu.yaml（TUM-VI/VINS 保守值，非实测，陀螺有死区）
+# 时间偏移：t_imu_corrected = t_imu - 0.0014314 s（Kalibr timeshift_cam_imu，须改数据时间戳）
+# 注意：本相机是 640x480 / 30 fps / YUYV，标定时修改任何一项都要重新标定。
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV)
+# Kalibr pinhole-radtan: fu, fv, pu, pv = 597.21229182, 592.36944712, 333.31335372, 248.12181619
+Camera1.fx: 597.21229182
+Camera1.fy: 592.36944712
+Camera1.cx: 333.31335372
+Camera1.cy: 248.12181619
+
+# 不要加 Camera1.k3：Settings.cc 用「有 k1 无 k3」判定 4 参数 radtan
+Camera1.k1: -0.14197997
+Camera1.k2: -0.08753020
+Camera1.p1: 0.00403666
+Camera1.p2: 0.00663662
+
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
+
+# Camera frames per second
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 0
+
+# Transformation from camera to body-frame (imu)
+# Kalibr 的 T_cam_imu 在此求逆；平移 = [0.0610, 0.1309, 0.1400] m（|t| ≈ 0.201 m，与尺量 ~0.20 m 吻合）
+# 【临时值】2026-09-20 加固后的新标定给出 |t| = 0.1862 m（平移比旧值小 15 mm、旋转差 3.19°），
+# 但同段两半的平移重复性只有 17.10 mm（目标 <5 mm），且操作者确认未改安装几何 —— 说明该平移
+# 外参目前只有 ~1.5 cm 量级可信度。待 data_imucam_rigid2/3 复核通过后再决定是否替换。
+# 【2026-09-20 尺量仲裁】操作者实测相机系 y（下）= 142.9 mm，与本文件的 142.9 mm 一致，
+# 而新标定为 122.9 mm（差 20 mm，且偏差正好落在重力轴 IMU-z 上，符合"加计零偏→平移"机理）。
+# 故继续沿用本值，不确定度记为 ±2 cm（主要在重力轴）；详见 IMU_issue.md §5.0。
+# 详见 zhangqiang/markdowns/IMU_issue.md §5.0。
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.69748457, -0.01244602, 0.71649171, 0.06104046,
+         -0.71659308, -0.01644381, 0.69729761, 0.13089194,
+          0.00310328, -0.99978733, -0.02038803, 0.13998810,
+          0.0, 0.0, 0.0, 1.0]
+
+# IMU 零偏先验（可选；不写这两行 = 0，行为与原生 ORB-SLAM3 完全一致）
+# 数据来源：2026-09-17 六面法离线分离（exps/mono/imu_sixface.py），2026-09-21 跨天复核一致
+#   · 加计零偏 (+0.400, -0.305, +0.033) m/s²，等效倾角 2.94°（尺度误差只有 0.15%）
+#   · 陀螺零偏被 0.61 °/s 死区掩盖、无法在静止段测出，故留 0
+# 生效方式：System::ApplyImuBias() 在 IMU 数据进入 Tracking 之前扣掉这两个常数；
+#   它只是**先验**，算法内部的零偏随机游走与在线估计照旧。
+#   想关掉做 A/B 对照：把这两行删掉（或改成 [0,0,0]）即可，数据不用重录。
+# 写法必须用 !!opencv-matrix（与 IMU.T_b_c1 一致）：普通 YAML 序列节点在
+# Settings::readParameter<cv::Mat> 里会触发 OpenCV 断言 isMap() 失败而 abort。
+IMU.AccBias: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: f
+   data: [0.400, -0.305, 0.033]
+
+IMU.GyroBias: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: f
+   data: [0.0, 0.0, 0.0]
+
+# IMU noise（calib/imu.yaml，保守缺省值，非实测）
+IMU.NoiseGyro: 1.6e-4
+IMU.NoiseAcc: 2.8e-3
+IMU.GyroWalk: 2.2e-5
+IMU.AccWalk: 8.6e-4
+IMU.Frequency: 100.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

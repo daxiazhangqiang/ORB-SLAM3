@@ -89,7 +89,10 @@ int main(int argc, char **argv)
     cout.precision(17);
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
-    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::MONOCULAR,false, 0, file_name);
+    // 打开 Pangolin 可视化窗口（原来的 false 是无界面批处理模式）；
+    // 批量离线实验时用 ORB_SLAM3_NO_VIEWER=1 关掉
+    bool bUseViewer = (getenv("ORB_SLAM3_NO_VIEWER") == nullptr);
+    ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::MONOCULAR,bUseViewer, 0, file_name);
     float imageScale = SLAM.GetImageScale();
 
     double t_resize = 0.f;
@@ -212,6 +215,18 @@ int main(int argc, char **argv)
         SLAM.SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
     }
 
+    // 导出地图点云和关键帧位姿为 PLY（可用 CloudCompare / MeshLab 查看）
+    if (bFileName)
+    {
+        SLAM.SaveMapPointsPLY(string(argv[argc-1]) + "_map_points.ply");
+        SLAM.SaveKeyFramesPLY(string(argv[argc-1]) + "_keyframes.ply");
+    }
+    else
+    {
+        SLAM.SaveMapPointsPLY("map_points.ply");
+        SLAM.SaveKeyFramesPLY("keyframes.ply");
+    }
+
     sort(vTimesTrack.begin(),vTimesTrack.end());
     float totaltime = 0;
     for(int ni=0; ni<nImages[0]; ni++)
@@ -222,7 +237,10 @@ int main(int argc, char **argv)
     cout << "median tracking time: " << vTimesTrack[nImages[0]/2] << endl;
     cout << "mean tracking time: " << totaltime/proccIm << endl;
 
-
+    // 这里原本是 `_exit(0)`：那时 System 析构前没人停 viewer 线程，而 main() 返回后的
+    // exit() 会卸载 Qt/GL 动态库，viewer 线程还在 cv::waitKey() 里画窗口 → 退出时段错误。
+    // 根因已在库里修掉（System::Shutdown() 现在会 RequestFinish + join viewer，见
+    // src/System.cc），所以恢复正常的 return，让析构与 stdio 冲刷都照常发生。
     return 0;
 }
 
@@ -253,5 +271,3 @@ void LoadImages(const string &strImagePath, const string &strPathTimes,
         }
     }
 }
-
-

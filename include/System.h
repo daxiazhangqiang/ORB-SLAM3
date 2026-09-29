@@ -104,6 +104,11 @@ public:
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
     System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const int initFr = 0, const string &strSequence = std::string());
 
+    // 停掉并回收后台线程（本地建图 / 回环 / viewer）。
+    // 即使调用者忘了显式调用 Shutdown()，析构函数也会兜住：后台线程在进程退出、
+    // 动态库被卸载时还活着，正是 2026-09-29 那次退出时 SIGSEGV 的根因。
+    ~System();
+
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
@@ -201,6 +206,10 @@ private:
 
     void SaveAtlas(int type);
     bool LoadAtlas(int type);
+
+    // 在 IMU 数据进入 Tracking 之前，按 yaml 里的 IMU.AccBias / IMU.GyroBias
+    // 扣掉一个常数零偏先验（默认 0 → 与原生行为完全一致）
+    std::vector<IMU::Point> ApplyImuBias(const std::vector<IMU::Point>& vImuMeas);
 
     string CalculateCheckSum(string filename, int type);
 
