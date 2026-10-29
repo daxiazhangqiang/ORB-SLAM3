@@ -152,6 +152,9 @@ protected:
 
     bool CheckFinish();
     void SetFinish();
+
+    // 回收独立优化线程，禁止 detach 后继续修改地图
+    void StopAndJoinGBA();
     bool mbFinishRequested;
     bool mbFinished;
     std::mutex mMutexFinish;

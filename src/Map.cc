@@ -359,7 +359,11 @@ void Map::SetLastMapChange(int currentChangeId)
 void Map::PreSave(std::set<GeometricCamera*> &spCams)
 {
     int nMPWithoutObs = 0;
-    for(MapPoint* pMPi : mspMapPoints)
+    // 先取快照再遍历：下面的 EraseObservation 会把点置坏并从 mspMapPoints 里删除，
+    // 直接遍历原集合会让迭代器失效（地图融合后必现，表现为存盘时段错误）
+    std::set<MapPoint*> spMapPointsSnapshot = mspMapPoints;
+    std::set<KeyFrame*> spKeyFramesSnapshot = mspKeyFrames;
+    for(MapPoint* pMPi : spMapPointsSnapshot)
     {
         if(!pMPi || pMPi->isBad())
             continue;
@@ -390,13 +394,13 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     // Backup of MapPoints
     mvpBackupMapPoints.clear();
-    for(MapPoint* pMPi : mspMapPoints)
+    for(MapPoint* pMPi : spMapPointsSnapshot)
     {
         if(!pMPi || pMPi->isBad())
             continue;
 
         mvpBackupMapPoints.push_back(pMPi);
-        pMPi->PreSave(mspKeyFrames,mspMapPoints);
+        pMPi->PreSave(spKeyFramesSnapshot,spMapPointsSnapshot);
     }
 
     // Backup of KeyFrames

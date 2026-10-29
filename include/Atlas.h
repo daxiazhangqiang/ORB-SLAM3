@@ -49,6 +49,7 @@ class Pinhole;
 class Atlas
 {
     friend class boost::serialization::access;
+    friend class System; // 停机后独立保存子图时临时选择序列化列表
 
     template<class Archive>
     void serialize(Archive &ar, const unsigned int version)

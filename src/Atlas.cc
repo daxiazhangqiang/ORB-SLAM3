@@ -259,6 +259,9 @@ Map* Atlas::GetCurrentMap()
 
 void Atlas::SetMapBad(Map* pMap)
 {
+    // 与 CountMaps()/GetAllMaps() 等读取路径共用 mMutexAtlas
+    // 现有调用点（Atlas::PreSave、LoopClosing::MergeLocal）都不持有该锁，不存在重入
+    unique_lock<mutex> lock(mMutexAtlas);
     mspMaps.erase(pMap);
     pMap->SetBad();
 
@@ -301,8 +304,14 @@ bool Atlas::isImuInitialized()
 
 void Atlas::PreSave()
 {
+    // 快照式读取 mspMaps，避免与 SetMapBad / CreateNewMap 等写路径并发
+    std::set<Map*> spMapsSnapshot;
+    {
+        unique_lock<mutex> lock(mMutexAtlas);
+        spMapsSnapshot = mspMaps;
+    }
     if(mpCurrentMap){
-        if(!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
+        if(!spMapsSnapshot.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
             mnLastInitKFidMap = mpCurrentMap->GetMaxKFid()+1; //The init KF is the next of current maximum
     }
 
@@ -313,7 +322,8 @@ void Atlas::PreSave()
             return elem1->GetId() < elem2->GetId();
         }
     };
-    std::copy(mspMaps.begin(), mspMaps.end(), std::back_inserter(mvpBackupMaps));
+    mvpBackupMaps.clear(); // 重复保存时避免累加旧指针
+    std::copy(spMapsSnapshot.begin(), spMapsSnapshot.end(), std::back_inserter(mvpBackupMaps));
     sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
 
     std::set<GeometricCamera*> spCams(mvpCameras.begin(), mvpCameras.end());
@@ -330,6 +340,8 @@ void Atlas::PreSave()
         pMi->PreSave(spCams);
     }
     RemoveBadMaps();
+    mvpBackupMaps.erase(std::remove_if(mvpBackupMaps.begin(), mvpBackupMaps.end(),
+        [](Map* m) { return !m || m->IsBad() || m->KeyFramesInMap() == 0; }), mvpBackupMaps.end());
 }
 
 void Atlas::PostLoad()
@@ -378,7 +390,7 @@ long unsigned int Atlas::GetNumLivedKF()
     long unsigned int num = 0;
     for(Map* pMap_i : mspMaps)
     {
-        num += pMap_i->GetAllKeyFrames().size();
+        num += pMap_i->KeyFramesInMap();
     }
 
     return num;
@@ -388,7 +400,7 @@ long unsigned int Atlas::GetNumLivedMP() {
     unique_lock<mutex> lock(mMutexAtlas);
     long unsigned int num = 0;
     for (Map* pMap_i : mspMaps) {
-        num += pMap_i->GetAllMapPoints().size();
+        num += pMap_i->MapPointsInMap();
     }
 
     return num;

@@ -87,6 +87,8 @@ public:
 
     // Use this function if you have deactivated local mapping and you only want to localize the camera.
     void InformOnlyTracking(const bool &flag);
+    // 纯定位启动：首帧直接在已加载地图中重定位，不触发单目新图初始化
+    void InformRelocalizationOnly(const bool &flag);
 
     void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame);
     KeyFrame* GetLastKeyFrame()
@@ -101,6 +103,7 @@ public:
     void NewDataset();
     int GetNumberDataset();
     int GetMatchesInliers();
+    int GetRelocalizationInliers();
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");
@@ -160,6 +163,7 @@ public:
 
     // True if local mapping is deactivated and we are performing only localization
     bool mbOnlyTracking;
+    bool mbRelocalizationOnly;
 
     void Reset(bool bLocMap = false);
     void ResetActiveMap(bool bLocMap = false);
@@ -314,6 +318,7 @@ protected:
 
     //Current matches in frame
     int mnMatchesInliers;
+    int mnRelocalizationInliers;
 
     //Last Frame, KeyFrame and Relocalisation Info
     KeyFrame* mpLastKeyFrame;

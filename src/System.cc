@@ -44,14 +44,28 @@ void System::SaveMapPointsPLY(const string &filename)
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
 
-    // 先一次性收集所有有效地图点坐标，保证头部声明数量与实际写入数量完全一致
+    // 每个子图一种颜色：PLY 本身没有“分组”概念，颜色是唯一能在 CloudCompare 里目视区分的办法
+    // 注意：未融合过的子图各自独立坐标系（尺度/位姿都不对应），这份合并文件只是叠加展示
+    static const int kPalette[10][3] = {
+        {0, 255, 0},   {255, 64, 64},  {64, 128, 255}, {255, 200, 0},  {180, 80, 255},
+        {0, 220, 220}, {255, 120, 200}, {160, 255, 80}, {255, 255, 255}, {120, 120, 120}};
+
+    // 先一次性收集所有有效地图点坐标与颜色，保证头部声明数量与实际写入数量完全一致
     vector<Eigen::Vector3f> vPoints;
+    vector<int> vColors;
+    size_t mapIndex = 0;
     for(Map* pMap : vpMaps)
     {
         vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
         for(MapPoint* pMP : vpMPs)
+        {
             if(!pMP->isBad())
+            {
                 vPoints.push_back(pMP->GetWorldPos());
+                vColors.push_back(static_cast<int>(mapIndex % 10));
+            }
+        }
+        mapIndex++;
     }
 
     ofstream f(filename.c_str());
@@ -63,7 +77,8 @@ void System::SaveMapPointsPLY(const string &filename)
     f << fixed << setprecision(9);
     f << "ply" << endl;
     f << "format ascii 1.0" << endl;
-    f << "comment ORB-SLAM3 map points (exported for CloudCompare/MeshLab)" << endl;
+    f << "comment ORB-SLAM3 map points; ALL maps in one file, color = submap (unaligned frames!)" << endl;
+    f << "comment for per-submap files use map_points_mapNN.ply" << endl;
     f << "element vertex " << vPoints.size() << endl;
     f << "property float x" << endl;
     f << "property float y" << endl;
@@ -73,11 +88,57 @@ void System::SaveMapPointsPLY(const string &filename)
     f << "property uchar blue" << endl;
     f << "end_header" << endl;
 
-    for(const Eigen::Vector3f& pos : vPoints)
-        f << pos(0) << " " << pos(1) << " " << pos(2) << " 0 255 0" << endl;
+    for(size_t i = 0; i < vPoints.size(); i++)
+    {
+        const int* c = kPalette[vColors[i]];
+        f << vPoints[i](0) << " " << vPoints[i](1) << " " << vPoints[i](2) << " "
+          << c[0] << " " << c[1] << " " << c[2] << endl;
+    }
 
     f.close();
-    cout << "Saved " << vPoints.size() << " map points to " << filename << endl;
+    cout << "Saved " << vPoints.size() << " map points from " << vpMaps.size()
+         << " submaps to " << filename << "（各子图坐标系未对齐，颜色区分）" << endl;
+}
+
+void System::SaveMapPointsPLYPerMap(const string &prefix)
+{
+    // 逐子图单独导出：每个文件都在自己子图的坐标系里，CloudCompare 可以任意挑一张看
+    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+    for(Map* pMap : vpMaps)
+    {
+        vector<Eigen::Vector3f> vPoints;
+        vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
+        for(MapPoint* pMP : vpMPs)
+            if(!pMP->isBad())
+                vPoints.push_back(pMP->GetWorldPos());
+
+        const string name = prefix + "_map" + to_string(pMap->GetId()) + ".ply";
+        ofstream f(name.c_str());
+        if(!f.is_open())
+        {
+            cerr << "ERROR: could not open " << name << endl;
+            continue;
+        }
+        f << fixed << setprecision(9);
+        f << "ply" << endl;
+        f << "format ascii 1.0" << endl;
+        f << "comment ORB-SLAM3 submap id=" << pMap->GetId()
+          << " keyframes=" << pMap->GetAllKeyFrames().size()
+          << " (own coordinate frame)" << endl;
+        f << "element vertex " << vPoints.size() << endl;
+        f << "property float x" << endl;
+        f << "property float y" << endl;
+        f << "property float z" << endl;
+        f << "property uchar red" << endl;
+        f << "property uchar green" << endl;
+        f << "property uchar blue" << endl;
+        f << "end_header" << endl;
+        for(const Eigen::Vector3f& pos : vPoints)
+            f << pos(0) << " " << pos(1) << " " << pos(2) << " 0 255 0" << endl;
+        f.close();
+        cout << "Saved " << vPoints.size() << " map points (submap id=" << pMap->GetId()
+             << ", KFs=" << pMap->GetAllKeyFrames().size() << ") to " << name << endl;
+    }
 }
 
 void System::SaveKeyFramesPLY(const string &filename)
@@ -570,6 +631,41 @@ void System::ActivateLocalizationMode()
     mbActivateLocalizationMode = true;
 }
 
+bool System::SelectLargestMap(int* mapId, size_t* keyframes)
+{
+    Map* best = nullptr;
+    size_t bestKFs = 0;
+    for(Map* pMap : mpAtlas->GetAllMaps())
+    {
+        if(!pMap || pMap->IsBad())
+            continue;
+        const size_t count = pMap->GetAllKeyFrames().size();
+        if(count > bestKFs)
+        {
+            best = pMap;
+            bestKFs = count;
+        }
+    }
+    if(!best)
+        return false;
+    mpAtlas->ChangeMap(best);
+    if(mapId)
+        *mapId = static_cast<int>(best->GetId());
+    if(keyframes)
+        *keyframes = bestKFs;
+    return true;
+}
+
+void System::EnableRelocalizationOnly()
+{
+    // 先停建图线程，再让跟踪器从首帧开始只做重定位
+    mpLocalMapper->RequestStop();
+    while(!mpLocalMapper->isStopped())
+        usleep(1000);
+    mpTracker->InformOnlyTracking(true);
+    mpTracker->InformRelocalizationOnly(true);
+}
+
 void System::DeactivateLocalizationMode()
 {
     unique_lock<mutex> lock(mMutexMode);
@@ -652,27 +748,18 @@ void System::Shutdown()
 
     cout << "Shutdown" << endl;
 
-    mpLocalMapper->RequestFinish();
-    mpLoopCloser->RequestFinish();
+    // 停机 + 有界等待抽到 RequestMappingStop()：请求结束、等后台静默、幂等可重入
+    RequestMappingStop();
 
-    // viewer 也必须停。它每帧都在 cv::waitKey() 里泵 Qt 事件循环、重绘 OpenCV 窗口，
-    // 而 main() 返回后的 exit() 会卸载动态库并析构 Qt/GL 的全局状态；两者并发就是
-    // 2026-09-29 抓到的退出崩溃（viewer 线程在 QBrush::QBrush()，主线程在 dlclose）。
-    // 上游把这段注释掉了，于是 viewer 线程会一直活到进程被拆掉为止。
-    if(mpViewer)
-        mpViewer->RequestFinish();
-
+    // Atlas 序列化必须在地图写线程停止后进行，超时则拒绝保存不一致快照
     if(!mStrSaveAtlasToFile.empty())
     {
+        if(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished()
+           || mpLoopCloser->isRunningGBA())
+            throw std::runtime_error("Atlas save refused: mapping/loop/GBA still running");
         Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
         SaveAtlas(FileType::BINARY_FILE);
     }
-
-    // 有界等待 + join：viewer 一帧的周期是 mT = 1000/fps ≈ 33 ms，通常几十毫秒就返回；
-    // LocalMapping / LoopClosing 可能要等一次 BA 收尾，超时就不再等（见 JoinThreadBounded）。
-    JoinThreadBounded(mptViewer,       mpViewer,       "Viewer",       2000);
-    JoinThreadBounded(mptLocalMapping, mpLocalMapper, "LocalMapping", 5000);
-    JoinThreadBounded(mptLoopClosing,  mpLoopCloser,  "LoopClosing",  5000);
 
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
@@ -1495,6 +1582,246 @@ int System::GetTrackingState()
     return mTrackingState;
 }
 
+int System::GetTrackingInliers()
+{
+    return mpTracker->GetMatchesInliers();
+}
+
+
+namespace {
+// 多关键帧几何一致性判据，不改变角点阈值或地图点剔除规则
+bool QualityStablePoint(MapPoint* point)
+{
+    if (!point || point->isBad()) return false;
+    const auto observations = point->GetObservations();
+    if (observations.size() < 3) return false;
+    const Eigen::Vector3f world = point->GetWorldPos();
+    if (!world.allFinite()) return false;
+    std::vector<Eigen::Vector3f> rays;
+    double first = 1e30, last = -1e30;
+    int tested = 0, good = 0;
+    for (const auto& observation : observations) {
+        auto* kf = observation.first;
+        const int index = std::get<0>(observation.second);
+        if (!kf || kf->isBad() || index < 0 || index >= int(kf->mvKeysUn.size())) continue;
+        if (++tested > 12) { --tested; break; }
+        const auto camera_point = kf->GetPose() * world;
+        if (camera_point.z() <= 0 || !camera_point.allFinite()) continue;
+        const auto& key = kf->mvKeysUn[index];
+        const auto pixel = kf->mpCamera->project(camera_point);
+        const double dx = pixel.x() - key.pt.x, dy = pixel.y() - key.pt.y;
+        if (key.octave < 0 || key.octave >= int(kf->mvInvLevelSigma2.size())) continue;
+        const double error = (dx*dx + dy*dy) * kf->mvInvLevelSigma2[key.octave];
+        if (!std::isfinite(error) || error > 5.991) continue;
+        ++good;
+        first = std::min(first, kf->mTimeStamp); last = std::max(last, kf->mTimeStamp);
+        rays.push_back((world - kf->GetCameraCenter()).normalized());
+    }
+    if (good < 3 || good < tested * .8 || last - first < 1.0) return false;
+    for (size_t i = 0; i < rays.size(); ++i)
+        for (size_t j = i + 1; j < rays.size(); ++j)
+            if (rays[i].dot(rays[j]) < std::cos(1.5 * M_PI / 180.0)) return true;
+    return false;
+}
+}
+
+// 跟踪线程在帧处理后采样，地图更新锁保护几何快照；最多扫描2000点避免无界遍历
+MapQualitySample System::GetMapQuality(bool inventory)
+{
+    MapQualitySample result;
+    result.state = GetTrackingState();
+    auto maps = mpAtlas->GetAllMaps();
+    Map* primary = nullptr;
+    for (auto* map : maps)
+        if (map && !map->IsBad() && (!primary || map->KeyFramesInMap() > primary->KeyFramesInMap() ||
+            (map->KeyFramesInMap() == primary->KeyFramesInMap() && map->GetId() < primary->GetId()))) primary = map;
+    if (!primary) return result;
+    result.map_id = primary->GetId();
+    result.active_map_id = mpAtlas->GetCurrentMap()->GetId();
+    // 仅读取各子图容器计数，不遍历其他子图的地图点
+    for (auto* map : maps)
+        if (map && map != primary && !map->IsBad())
+            result.other_submaps.emplace_back(map->GetId(), map->MapPointsInMap());
+    std::unique_lock<std::mutex> lock(primary->mMutexMapUpdate);
+    result.revision = primary->GetLastBigChangeIdx();
+    result.keyframes = primary->KeyFramesInMap(); result.points = primary->MapPointsInMap();
+    auto keyframes = primary->GetAllKeyFrames();
+    keyframes.erase(std::remove_if(keyframes.begin(), keyframes.end(), [](KeyFrame* k) { return !k || k->isBad(); }), keyframes.end());
+    std::sort(keyframes.begin(), keyframes.end(), [](KeyFrame* a, KeyFrame* b) { return a->mTimeStamp < b->mTimeStamp; });
+    std::map<unsigned long, KeyFrame*> anchors;
+    // 每十个最终关键帧选一个位置朝向锚点，首尾均保留，单位不依赖尺度
+    for (size_t i = 0; i < keyframes.size(); ++i)
+        if (i % 10 == 0 || i + 1 == keyframes.size()) {
+            anchors[keyframes[i]->mnId] = keyframes[i];
+            result.route_anchors.push_back(keyframes[i]->mnId);
+        }
+    if (inventory) {
+        auto points = primary->GetAllMapPoints();
+        const size_t step = std::max(size_t(1), (points.size() + 1999) / 2000);
+        for (size_t i = 0; i < points.size(); i += step) {
+            ++result.tested_points;
+            if (QualityStablePoint(points[i])) ++result.stable_points;
+        }
+    }
+    if (result.state != 2 || result.active_map_id != result.map_id) return result;
+    const Frame& frame = mpTracker->mCurrentFrame;
+    const auto center = frame.GetPose().inverse().translation();
+    std::set<int> cells;
+    std::map<unsigned long, int> votes;
+    for (size_t i = 0; i < frame.mvpMapPoints.size(); ++i) {
+        auto* point = frame.mvpMapPoints[i];
+        if (!point || point->isBad() || point->GetMap() != primary ||
+            i >= frame.mvbOutlier.size() || frame.mvbOutlier[i] || point->Observations() < 1) continue;
+        ++result.inliers;
+        if (!QualityStablePoint(point)) continue;
+        ++result.stable_matches;
+        if (i < frame.mvKeysUn.size()) {
+            const auto& pt = frame.mvKeysUn[i].pt;
+            if (pt.x >= 0 && pt.x < 640 && pt.y >= 0 && pt.y < 480)
+                cells.insert(int(pt.y / 160) * 4 + int(pt.x / 160));
+        }
+        const auto world = point->GetWorldPos();
+        for (const auto& observation : point->GetObservations()) {
+            auto* kf = observation.first;
+            if (!kf || !anchors.count(kf->mnId)) continue;
+            const Eigen::Vector3f ray = world - kf->GetCameraCenter();
+            const Eigen::Vector3f current_ray = world - center;
+            // 匹配同一点仍须验证观察方向和相对深度范围，不能远处静止刷覆盖
+            if (ray.norm() > 1e-6 && current_ray.norm() > 1e-6 &&
+                (center - kf->GetCameraCenter()).norm() <= .3 * ray.norm() &&
+                ray.normalized().dot(current_ray.normalized()) >= std::cos(30.0 * M_PI / 180.0) &&
+                (frame.GetPose().rotationMatrix() * kf->GetPose().rotationMatrix().transpose()).trace() >= 1 + 2*std::cos(30.0*M_PI/180.0))
+                ++votes[kf->mnId];
+        }
+    }
+    result.grid_cells = cells.size();
+    for (const auto& vote : votes) if (vote.second >= 12) result.visible_anchors.push_back(vote.first);
+    return result;
+}
+
+int System::GetRelocalizationInliers()
+{
+    return mpTracker->GetRelocalizationInliers();
+}
+
+// 只读取容器计数，适合分钟级监控
+vector<System::SubmapStats> System::GetSubmapStats()
+{
+    vector<SubmapStats> result;
+    for(Map* m : mpAtlas->GetAllMaps())
+        if(m && !m->IsBad())
+            result.push_back({m->GetId(), m->KeyFramesInMap(), m->MapPointsInMap()});
+    sort(result.begin(), result.end(), [](const SubmapStats& a, const SubmapStats& b) {
+        return a.keyframes != b.keyframes ? a.keyframes > b.keyframes : a.id < b.id;
+    });
+    return result;
+}
+
+// 以最终有效关键帧为尺度依据，避免跨断图或使用优化前的历史位姿
+void System::PrepareSubmapExport(const string &prefix)
+{
+    RequestMappingStop();
+    if(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+        throw runtime_error("Submap export refused: mapping/loop/GBA still running");
+    mpAtlas->PreSave();
+    ofstream manifest(prefix + "_submaps.csv");
+    manifest.exceptions(ios::badbit | ios::failbit);
+    manifest << "map_id,keyframes,map_points,primary\n";
+    auto stats = GetSubmapStats();
+    for(const auto& st : stats)
+    {
+        manifest << st.id << ',' << st.keyframes << ',' << st.points << ','
+                 << (st.id == stats.front().id ? 1 : 0) << '\n';
+        for(Map* m : mpAtlas->GetAllMaps())
+            if(m->GetId() == st.id)
+                SaveKeyFrameTrajectoryEuRoC(prefix + "_" + to_string(st.id) + "_kf_raw.txt", m);
+    }
+}
+
+// 序列化列表仅在后台静默时切换，单图文件沿用标准 Atlas 格式
+void System::SaveSubmaps(const string &prefix, unsigned long primaryId, double scale, bool saveAtlas)
+{
+    if(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+        throw runtime_error("Submap save refused: mapping/loop/GBA still running");
+    const auto stats = GetSubmapStats();
+    if(stats.empty()) return;
+    const unsigned long mainId = stats.front().id;
+    if(!std::isfinite(static_cast<float>(scale)) || scale <= 0.0
+       || (primaryId != static_cast<unsigned long>(-1) && primaryId != mainId)
+       || (primaryId == static_cast<unsigned long>(-1) && scale != 1.0))
+        throw runtime_error("Invalid primary map scale");
+    for(Map* m : mpAtlas->GetAllMaps())
+        if(m->GetId() == mainId && scale != 1.0)
+            m->ApplyScaledRotation(Sophus::SE3f(), static_cast<float>(scale), true);
+    mpAtlas->PreSave();
+    const auto backup = mpAtlas->mvpBackupMaps;
+    const string checksum = saveAtlas ? CalculateCheckSum(mStrVocabularyFilePath, TEXT_FILE) : "";
+    const string voc = mStrVocabularyFilePath.substr(mStrVocabularyFilePath.find_last_of("/\\") + 1);
+    // 临时文件写完后原子替换，避免留下看似完整的半份地图
+    auto save = [&](const string& path) {
+        const string tmp = path + ".tmp";
+        ofstream out(tmp, ios::binary);
+        out.exceptions(ios::badbit | ios::failbit);
+        { boost::archive::binary_oarchive ar(out); ar << voc; ar << checksum; ar << mpAtlas; }
+        out.close();
+        if(std::rename(tmp.c_str(), path.c_str()) != 0) throw runtime_error("Cannot rename " + tmp);
+    };
+    try {
+        if(saveAtlas) save(prefix + ".osa");
+        for(Map* m : backup)
+        {
+            const string base = prefix + "_" + to_string(m->GetId());
+            mpAtlas->mvpBackupMaps = {m};
+            if(saveAtlas) save(base + ".osa");
+            vector<Eigen::Vector3f> points;
+            for(MapPoint* p : m->GetAllMapPoints())
+                if(p && !p->isBad()) points.push_back(p->GetWorldPos());
+            ofstream ply(base + ".ply");
+            ply.exceptions(ios::badbit | ios::failbit);
+            ply << "ply\nformat ascii 1.0\ncomment submap " << m->GetId()
+                << " independent coordinates; " << (m->GetId() == mainId && primaryId == mainId ? "wheel scaled" : "native units")
+                << "\nelement vertex " << points.size()
+                << "\nproperty float x\nproperty float y\nproperty float z\nend_header\n" << setprecision(9);
+            for(const auto& p : points) ply << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
+            SaveKeyFrameTrajectoryEuRoC(base + "_kf.txt", m);
+            cout << "[submap] " << base << " KFs=" << m->KeyFramesInMap()
+                 << " points=" << points.size() << (m->GetId() == mainId ? " PRIMARY" : "") << endl;
+        }
+    } catch(...) { mpAtlas->mvpBackupMaps = backup; throw; }
+    mpAtlas->mvpBackupMaps = backup;
+}
+
+int System::GetAtlasMapCount()
+{
+    // CountMaps() 自身持 mMutexAtlas，这里不再加锁，避免同锁重入
+    return mpAtlas->CountMaps();
+}
+
+int System::GetKeyFrameCount()
+{
+    return static_cast<int>(mpAtlas->GetNumLivedKF());
+}
+
+double System::GetLastKeyFrameTimestamp()
+{
+    // Tracking::GetLastKeyFrame() 是公开接口；mpLastKeyFrame 本身是 protected
+    KeyFrame* pLast = mpTracker->GetLastKeyFrame();
+    return pLast ? pLast->mTimeStamp : -1.0;
+}
+
+void System::RequestMappingStop()
+{
+    // 幂等：RequestFinish 只置标志；JoinThreadBounded 在已 join 后是空操作
+    mpLocalMapper->RequestFinish();
+    mpLoopCloser->RequestFinish();
+    if(mpViewer)
+        mpViewer->RequestFinish();
+
+    JoinThreadBounded(mptViewer,       mpViewer,       "Viewer",       2000);
+    JoinThreadBounded(mptLocalMapping, mpLocalMapper, "LocalMapping", 5000);
+    JoinThreadBounded(mptLoopClosing,  mpLoopCloser,  "LoopClosing",  30000);
+}
+
 vector<MapPoint*> System::GetTrackedMapPoints()
 {
     unique_lock<mutex> lock(mMutexState);
@@ -1618,9 +1945,12 @@ bool System::LoadAtlas(int type)
     string strFileVoc, strVocChecksum;
     bool isRead = false;
 
-    string pathLoadFileName = "./";
-    pathLoadFileName = pathLoadFileName.append(mStrLoadAtlasFromFile);
-    pathLoadFileName = pathLoadFileName.append(".osa");
+    // 兼容相对 stem、显式 .osa 文件名和绝对路径
+    string pathLoadFileName = mStrLoadAtlasFromFile;
+    if(pathLoadFileName.size() < 4 || pathLoadFileName.substr(pathLoadFileName.size()-4) != ".osa")
+        pathLoadFileName += ".osa";
+    if(!pathLoadFileName.empty() && pathLoadFileName[0] != '/')
+        pathLoadFileName = "./" + pathLoadFileName;
 
     if(type == TEXT_FILE) // File text
     {

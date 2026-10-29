@@ -1,0 +1,121 @@
+%YAML:1.0
+
+# 由 zhangqiang/tools/calibration_env/merge_imucam.py 生成
+# 相机内参：A3 标定板（6x6 / tag 35 mm / 间隙 11 mm）合并标定结果
+# 相机-IMU 外参：两次独立 300 s 联合标定（20261014_131000 / 20261014_131640）合并
+# 注意：本机相机原始帧是左右镜像，进标定的图像已按 CAMERA_HFLIP=1 翻正
+#       当前替换相机运行 focus_auto=0 + focus_absolute=392，内参暂沿用 192 标定
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV)
+# Kalibr pinhole-radtan: fu, fv, pu, pv = 827.60989312, 827.85314569, 301.17115107, 208.97859358
+Camera1.fx: 827.60989312
+Camera1.fy: 827.85314569
+Camera1.cx: 301.17115107
+Camera1.cy: 208.97859358
+
+# 不要加 Camera1.k3：Settings.cc 用「有 k1 无 k3」判定 4 参数 radtan
+Camera1.k1: -0.00391764
+Camera1.k2: -0.01460449
+Camera1.p1: -0.00585639
+Camera1.p2: 0.00239326
+
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
+
+# Camera frames per second
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 0
+
+# 从相机到 IMU（body）的变换，即 IMU.T_b_c1 = inverse(Kalibr T_cam_imu)
+# ORB-SLAM3 官方定义：把点从 Camera1 变到 IMU 的变换（Calibration_Tutorial.pdf §5.4）；
+# 源码里也是这么用的：Frame.cc 用 mTcb（= 本矩阵的逆）把 body 位姿变到相机位姿
+# 方向搞反的后果是单目惯性初始化反复失败，所以换标定板/换相机后要重新确认这一项
+# 合并值 |t| = 88.5 mm；两次联合标定之间偏差：旋转 0.14°、平移 8.4 mm
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-0.99919028, 0.00338296, -0.04009173, -0.05698720,
+         0.00469744, 0.99945292, -0.03273821, -0.05955848,
+         0.03995904, -0.03290003, -0.99865953, -0.03207775,
+         0.00000000, 0.00000000, 0.00000000, 1.00000000]
+
+# IMU 零偏先验（可选；不写这两行 = 0，行为与原生 ORB-SLAM3 完全一致）
+# 生效方式：System 在 IMU 数据进入 Tracking 之前扣掉这两个常数，算法内部仍会在线估计零偏
+# 数据来源见 zhangqiang/tools/calibration_env/config/imu_bias_ref.yaml
+# 本机换了 IMU 之后必须重新取值：SH3001 板载 IMU 与早期 UART IMU 的零偏不是一回事
+IMU.AccBias: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: f
+   data: [-1.510000, 0.550000, 1.830000]
+
+IMU.GyroBias: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: f
+   data: [-0.054280, -0.137290, 0.002000]
+
+# IMU 噪声：静止 600 s Allan 偏差实测（详见 config/imu.yaml 与 config/noise_report.json）
+# 这些是连续时间白噪声密度（rad/s/√Hz、m/s²/√Hz），与 Kalibr/VINS 口径一致
+IMU.NoiseGyro: 0.0004528473059
+IMU.NoiseAcc: 0.002498365392
+IMU.GyroWalk: 7.624675336e-05
+IMU.AccWalk: 0.001474852088
+# 实测节拍 196.1 Hz（联合录制，相机同时在跑）/ 200.0 Hz（仅 IMU 静止录制），
+# Settings.cc 只用它做 sqrt(freq) 噪声缩放，真正积分间隔由时间戳决定
+IMU.Frequency: 196.0900
+
+# 时间偏移：Kalibr timeshift_cam_imu = 合并后的 0.011892 s，含义是 t_imu = t_cam + shift
+# 本文件不改数据时间戳，因此该偏移由数据预处理负责：离线转 bag 时把 IMU 时间戳整体减掉
+# 0.011892 s（等价于把相机时间戳加上）。在线运行时同样要先把两端时间戳对齐再喂给 SLAM，
+# 否则初始化会因为视觉和惯性不一致而失败
+
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+# 单目惯性在 IMU 初始化完成之前，ORB-SLAM3 要求 TrackLocalMap 至少 50 个内点才能算跟踪成功
+#（纯单目只要 15 个，而且纯单目一直用 5 倍特征的初始化提取器，单目惯性只在前几帧用）
+# 所以场景纹理弱时 1000 个特征撑不住：2026-10-14 拿 A3 标定板做实测，
+# 1000 特征时关联地图点只有 45~92 → 跟踪几帧就失败 → IMU 还没初始化就整图复位，反复重来
+# 2000 特征：能持续跟踪（关联 118~196）
+# 3000 特征：更稳（关联 588~653）
+# 代价：3000 特征在 RK3588 上约 90 ms/帧，30 fps 实时跟不上，实时跑建议降到 15 fps 或换有纹理的场景
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

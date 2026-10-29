@@ -21,6 +21,8 @@
 #define SYSTEM_H
 
 
+#include "MapQuality.h"
+
 #include <unistd.h>
 #include<stdio.h>
 #include<stdlib.h>
@@ -130,6 +132,10 @@ public:
     void ActivateLocalizationMode();
     // This resumes local mapping thread and performs SLAM again.
     void DeactivateLocalizationMode();
+    // 选择关键帧最多的子图作为当前地图
+    bool SelectLargestMap(int* mapId = nullptr, size_t* keyframes = nullptr);
+    // 纯定位启动：停止建图线程，首帧直接在已加载地图中重定位
+    void EnableRelocalizationOnly();
 
     // Returns true if there have been a big map change (loop closure, global BA)
     // since last call to this function
@@ -166,6 +172,8 @@ public:
     // Save map points / keyframe camera centers as PLY point clouds,
     // for inspection with CloudCompare / MeshLab. Call first Shutdown().
     void SaveMapPointsPLY(const string &filename);
+    // 逐子图单独导出（<prefix>_map<id>.ply），坐标系各自独立可比
+    void SaveMapPointsPLYPerMap(const string &prefix);
     void SaveKeyFramesPLY(const string &filename);
 
     // Save data used for initialization debug
@@ -184,8 +192,31 @@ public:
     // Information from most recent processed frame
     // You can call this right after TrackMonocular (or stereo or RGBD)
     int GetTrackingState();
+    int GetTrackingInliers();
+    // 仅在 Track 返回后的同一线程调用，低频获取主图质量和位置朝向覆盖
+    MapQualitySample GetMapQuality(bool inventory = false);
+    int GetRelocalizationInliers();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+
+    // Atlas 当前子地图数量（在线监控用：只暴露整数，不暴露 Atlas*/Map*）
+    int GetAtlasMapCount();
+    // 低频读取各子图计数，不遍历地图点
+    struct SubmapStats { unsigned long id; size_t keyframes; size_t points; };
+    vector<SubmapStats> GetSubmapStats();
+    // 停机并确认后台静默后导出各子图的最终关键帧轨迹与清单
+    void PrepareSubmapExport(const string &prefix);
+    // 仅还原最大子图尺度，保存完整 Atlas 与独立子图和点云
+    void SaveSubmaps(const string &prefix, unsigned long primaryId, double scale, bool saveAtlas);
+
+
+    // 关键帧计数与最新关键帧时间戳（在线保存关键帧图像用；只暴露数值）
+    int GetKeyFrameCount();
+    double GetLastKeyFrameTimestamp();
+
+    // 请求后台建图/回环线程结束并有界等待，可重复调用
+    // 用途：在保存 Atlas 之前先拿到一致快照（退出时的轨迹导出与尺度校验）
+    void RequestMappingStop();
 
     // For debugging
     double GetTimeFromIMUInit();

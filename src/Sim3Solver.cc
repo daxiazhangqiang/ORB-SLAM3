@@ -18,6 +18,8 @@
 
 
 #include "Sim3Solver.h"
+#include "Sim3Numerics.h"
+#include <limits>
 
 #include <vector>
 #include <cmath>
@@ -186,6 +188,8 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
         }
 
         ComputeSim3(P3Dc1i,P3Dc2i);
+        // 退化样本不参与内点评分，继续下一次RANSAC采样
+        if (!mT12i.allFinite() || !mT21i.allFinite()) continue;
 
         CheckInliers();
 
@@ -235,7 +239,7 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
 
     int nCurrentIterations = 0;
 
-    Eigen::Matrix4f bestSim3;
+    Eigen::Matrix4f bestSim3 = Eigen::Matrix4f::Identity();
 
     while(mnIterations<mRansacMaxIts && nCurrentIterations<nIterations)
     {
@@ -259,6 +263,8 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
         }
 
         ComputeSim3(P3Dc1i,P3Dc2i);
+        // 退化样本不参与内点评分，继续下一次RANSAC采样
+        if (!mT12i.allFinite() || !mT21i.allFinite()) continue;
 
         CheckInliers();
 
@@ -310,6 +316,11 @@ void Sim3Solver::ComputeCentroid(Eigen::Matrix3f &P, Eigen::Matrix3f &Pr, Eigen:
 
 void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 {
+    // 失败候选保持无效标记，防止沿用上一次采样的变换
+    mT12i.setConstant(std::numeric_limits<float>::quiet_NaN());
+    mT21i.setConstant(std::numeric_limits<float>::quiet_NaN());
+    if (!P1.allFinite() || !P2.allFinite()) return;
+
     // Custom implementation of:
     // Horn 1987, Closed-form solution of absolute orientataion using unit quaternions
 
@@ -325,7 +336,12 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     // Step 2: Compute M matrix
 
+    // 重合或共线的三点不能确定唯一旋转，直接舍弃
+    if (!Pr1.allFinite() || !Pr2.allFinite() ||
+        (Pr1.col(1)-Pr1.col(0)).cross(Pr1.col(2)-Pr1.col(0)).squaredNorm() <= 0 ||
+        (Pr2.col(1)-Pr2.col(0)).cross(Pr2.col(2)-Pr2.col(0)).squaredNorm() <= 0) return;
     Eigen::Matrix3f M = Pr2 * Pr1.transpose();
+    if (!M.allFinite()) return;
 
     // Step 3: Compute N matrix
     double N11, N12, N13, N14, N22, N23, N24, N33, N34, N44;
@@ -352,6 +368,7 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
     // Step 4: Eigenvector of the highest eigenvalue
     Eigen::EigenSolver<Eigen::Matrix4f> eigSolver;
     eigSolver.compute(N);
+    if (eigSolver.info() != Eigen::Success) return;
 
     Eigen::Vector4f eval = eigSolver.eigenvalues().real();
     Eigen::Matrix4f evec = eigSolver.eigenvectors().real(); //evec[0] is the quaternion of the desired rotation
@@ -359,13 +376,8 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
     int maxIndex; // should be zero
     eval.maxCoeff(&maxIndex);
 
-    Eigen::Vector3f vec = evec.block<3,1>(1,maxIndex); //extract imaginary part of the quaternion (sin*axis)
-
-    // Rotation angle. sin is the norm of the imaginary part, cos is the real part
-    double ang=atan2(vec.norm(),evec(0,maxIndex));
-
-    vec = 2*ang*vec/vec.norm(); //Angle-axis representation. quaternion angle is the half
-    mR12i = Sophus::SO3f::exp(vec).matrix();
+    if (!eval.allFinite() || !evec.allFinite() ||
+        !Sim3QuaternionRotation(evec.col(maxIndex), mR12i)) return;
 
     // Step 5: Rotate set 2
     Eigen::Matrix3f P3 = mR12i*Pr2;
@@ -374,18 +386,18 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     if(!mbFixScale)
     {
-        double cvnom = Converter::toCvMat(Pr1).dot(Converter::toCvMat(P3));
         double nom = (Pr1.array() * P3.array()).sum();
-        if (abs(nom-cvnom)>1e-3)
-            std::cout << "sim3 solver: " << abs(nom-cvnom) << std::endl << nom << std::endl;
         Eigen::Array<float,3,3> aux_P3;
         aux_P3 = P3.array() * P3.array();
         double den = aux_P3.sum();
 
+        if (!std::isfinite(nom) || !std::isfinite(den) || den <= 0) return;
         ms12i = nom/den;
     }
     else
         ms12i = 1.0f;
+
+    if (!std::isfinite(ms12i) || ms12i <= 0) return;
 
     // Step 7: Translation
     mt12i = O1 - ms12i * mR12i * O2;

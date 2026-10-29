@@ -43,9 +43,9 @@ namespace ORB_SLAM3
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
-    mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+    mbOnlyTracking(false), mbRelocalizationOnly(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
-    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), mnRelocalizationInliers(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     // Load camera parameters from settings file
@@ -1583,7 +1583,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 
     if (mSensor == System::MONOCULAR)
     {
-        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
+        if(!mbRelocalizationOnly && (mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames))
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
         else
             mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
@@ -1898,13 +1898,28 @@ void Tracking::Track()
 
     if(mState==NOT_INITIALIZED)
     {
-        if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
+        if(mbRelocalizationOnly)
         {
-            StereoInitialization();
+            // 纯定位首帧：只在已加载地图中重定位，不能退回新建地图
+            if(!Relocalization())
+            {
+                mLastFrame = Frame(mCurrentFrame);
+                return;
+            }
+            mState = OK;
+            mbVelocity = false;
+            mnFirstFrameId = mCurrentFrame.mnId;
         }
         else
         {
-            MonocularInitialization();
+            if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
+            {
+                StereoInitialization();
+            }
+            else
+            {
+                MonocularInitialization();
+            }
         }
 
         //mpFrameDrawer->Update(this);
@@ -2036,7 +2051,8 @@ void Tracking::Track()
         else
         {
             // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
-            if(mState==LOST)
+            // 纯定位没有建图兜底：RECENTLY_LOST 也要立即尝试重定位，否则会永久卡住
+            if(mState==LOST || mState==RECENTLY_LOST)
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
@@ -3027,6 +3043,13 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
+    // 诊断输出优化后真实内点数，避免用非空关联点数量替代跟踪门槛
+    if(getenv("ORB_SLAM3_DBG_TRACK"))
+        cout << "[DBG-TRACK] t=" << mCurrentFrame.mTimeStamp
+             << " frame=" << mCurrentFrame.mnId << " inliers=" << mnMatchesInliers
+             << " imu=" << mpAtlas->isImuInitialized()
+             << " state=" << mState << " reloc_window="
+             << (mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames) << endl;
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
         return false;
 
@@ -3756,6 +3779,10 @@ bool Tracking::Relocalization()
                 // If the pose is supported by enough inliers stop ransacs and continue
                 if(nGood>=50)
                 {
+                    // 重定位成功的候选关键帧作为当前参考帧，纯定位首帧也需要它
+                    mnRelocalizationInliers = nGood;
+                    mpReferenceKF = vpCandidateKFs[i];
+                    mCurrentFrame.mpReferenceKF = mpReferenceKF;
                     bMatch = true;
                     break;
                 }
@@ -3826,6 +3853,7 @@ void Tracking::Reset(bool bLocMap)
     mlbLost.clear();
     mCurrentFrame = Frame();
     mnLastRelocFrameId = 0;
+    mnRelocalizationInliers = 0;
     mLastFrame = Frame();
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
@@ -3977,6 +4005,11 @@ void Tracking::InformOnlyTracking(const bool &flag)
     mbOnlyTracking = flag;
 }
 
+void Tracking::InformRelocalizationOnly(const bool &flag)
+{
+    mbRelocalizationOnly = flag;
+}
+
 void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame)
 {
     Map * pMap = pCurrentKeyFrame->GetMap();
@@ -4063,6 +4096,11 @@ int Tracking::GetNumberDataset()
 int Tracking::GetMatchesInliers()
 {
     return mnMatchesInliers;
+}
+
+int Tracking::GetRelocalizationInliers()
+{
+    return mnRelocalizationInliers;
 }
 
 void Tracking::SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder)

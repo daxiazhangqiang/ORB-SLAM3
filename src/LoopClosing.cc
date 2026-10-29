@@ -305,6 +305,8 @@ void LoopClosing::Run()
         usleep(5000);
     }
 
+    // 回环结束必须包含独立 GBA 的退出，导出才能安全读取地图
+    StopAndJoinGBA();
     SetFinish();
 }
 
@@ -976,24 +978,15 @@ void LoopClosing::CorrectLoop()
     mpLocalMapper->EmptyQueue(); // Proccess keyframes in the queue
 
     // If a Global Bundle Adjustment is running, abort it
-    if(isRunningGBA())
+    if(mpThreadGBA)
     {
         cout << "Stoping Global Bundle Adjustment...";
-        unique_lock<mutex> lock(mMutexGBA);
-        mbStopGBA = true;
-
-        mnFullBAIdx++;
-
-        if(mpThreadGBA)
-        {
-            mpThreadGBA->detach();
-            delete mpThreadGBA;
-        }
+        StopAndJoinGBA();
         cout << "  Done!!" << endl;
     }
 
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -1198,6 +1191,7 @@ void LoopClosing::CorrectLoop()
     // Launch a new thread to perform Global Bundle Adjustment (Only if few keyframes, if not it would take too much time)
     if(!pLoopMap->isImuInitialized() || (pLoopMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1))
     {
+        unique_lock<mutex> lock(mMutexGBA);
         mbRunningGBA = true;
         mbFinishedGBA = false;
         mbStopGBA = false;
@@ -1228,26 +1222,17 @@ void LoopClosing::MergeLocal()
 
     //Verbose::PrintMess("MERGE-VISUAL: Check Full Bundle Adjustment", Verbose::VERBOSITY_DEBUG);
     // If a Global Bundle Adjustment is running, abort it
-    if(isRunningGBA())
+    if(mpThreadGBA)
     {
-        unique_lock<mutex> lock(mMutexGBA);
-        mbStopGBA = true;
-
-        mnFullBAIdx++;
-
-        if(mpThreadGBA)
-        {
-            mpThreadGBA->detach();
-            delete mpThreadGBA;
-        }
-        bRelaunchBA = true;
+        bRelaunchBA = isRunningGBA();
+        StopAndJoinGBA();
     }
 
     //Verbose::PrintMess("MERGE-VISUAL: Request Stop Local Mapping", Verbose::VERBOSITY_DEBUG);
     //cout << "Request Stop Local Mapping" << endl;
     mpLocalMapper->RequestStop();
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -1706,7 +1691,7 @@ void LoopClosing::MergeLocal()
 
         mpLocalMapper->RequestStop();
         // Wait until Local Mapping has effectively stopped
-        while(!mpLocalMapper->isStopped())
+        while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
         {
             usleep(1000);
         }
@@ -1763,6 +1748,7 @@ void LoopClosing::MergeLocal()
     if(bRelaunchBA && (!pCurrentMap->isImuInitialized() || (pCurrentMap->KeyFramesInMap()<200 && mpAtlas->CountMaps()==1)))
     {
         // Launch a new thread to perform Global Bundle Adjustment
+        unique_lock<mutex> lock(mMutexGBA);
         mbRunningGBA = true;
         mbFinishedGBA = false;
         mbStopGBA = false;
@@ -1801,26 +1787,17 @@ void LoopClosing::MergeLocal2()
 
     //cout << "Check Full Bundle Adjustment" << endl;
     // If a Global Bundle Adjustment is running, abort it
-    if(isRunningGBA())
+    if(mpThreadGBA)
     {
-        unique_lock<mutex> lock(mMutexGBA);
-        mbStopGBA = true;
-
-        mnFullBAIdx++;
-
-        if(mpThreadGBA)
-        {
-            mpThreadGBA->detach();
-            delete mpThreadGBA;
-        }
-        bRelaunchBA = true;
+        bRelaunchBA = isRunningGBA();
+        StopAndJoinGBA();
     }
 
 
     //cout << "Request Stop Local Mapping" << endl;
     mpLocalMapper->RequestStop();
     // Wait until Local Mapping has effectively stopped
-    while(!mpLocalMapper->isStopped())
+    while(!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished())
     {
         usleep(1000);
     }
@@ -2508,6 +2485,27 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
         mbFinishedGBA = true;
         mbRunningGBA = false;
     }
+}
+
+// 仅由回环线程调用，取消并回收 GBA 后再允许融合、重启或导出
+void LoopClosing::StopAndJoinGBA()
+{
+    {
+        unique_lock<mutex> lock(mMutexGBA);
+        mbStopGBA = true;
+        ++mnFullBAIdx;
+    }
+    if(mpThreadGBA)
+    {
+        if(mpThreadGBA->joinable())
+            mpThreadGBA->join();
+        delete mpThreadGBA;
+        mpThreadGBA = nullptr;
+    }
+    // 只有实际 join 后才能清理状态，兼容 GBA 提前返回的路径
+    unique_lock<mutex> lock(mMutexGBA);
+    mbRunningGBA = false;
+    mbFinishedGBA = true;
 }
 
 void LoopClosing::RequestFinish()

@@ -134,6 +134,12 @@ void LocalMapping::Run()
 
                         if(dist>0.05)
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
+                        // 记录关键帧位移与有效运动时间，不改变初始化门槛
+                        if(getenv("ORB_SLAM3_DBG_TRACK"))
+                            cout << "[DBG-MOTION] t=" << mpCurrentKeyFrame->mTimeStamp
+                                 << " dist=" << dist << " mTinit=" << mTinit
+                                 << " ba1=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA1()
+                                 << " ba2=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA2() << endl;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
                             if((mTinit<10.f) && (dist<0.02))
@@ -182,7 +188,13 @@ void LocalMapping::Run()
                 if(!mpCurrentKeyFrame->GetMap()->isImuInitialized() && mbInertial)
                 {
                     if (mbMonocular)
-                        InitializeIMU(1e2, 1e10, true);
+                    {
+                        // 加计零偏先验强度可用 ORB_SLAM3_PRIOR_A 覆盖，便于做归因实验
+                        const float priorAInit = getenv("ORB_SLAM3_PRIOR_A")
+                                                     ? static_cast<float>(atof(getenv("ORB_SLAM3_PRIOR_A")))
+                                                     : 1e10f;
+                        InitializeIMU(1e2, priorAInit, true);
+                    }
                     else
                         InitializeIMU(1e2, 1e5, true);
                 }

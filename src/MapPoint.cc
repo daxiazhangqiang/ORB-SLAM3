@@ -577,6 +577,7 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
 
     mBackupObservationsId1.clear();
     mBackupObservationsId2.clear();
+    vector<KeyFrame*> vpKFsToErase;
     // Save the id and position in each KF who view it
     for(std::map<KeyFrame*,std::tuple<int,int> >::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
     {
@@ -588,8 +589,15 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
         }
         else
         {
-            EraseObservation(pKFi);
+            // 这里不能直接 EraseObservation，它会在遍历中改动 mObservations 导致迭代器失效
+            // 地图融合后 MapPoint 常残留别的子图的观测，先收集再统一删除
+            vpKFsToErase.push_back(pKFi);
         }
+    }
+
+    for(KeyFrame* pKFi : vpKFsToErase)
+    {
+        EraseObservation(pKFi);
     }
 
     // Save the id of the reference KF

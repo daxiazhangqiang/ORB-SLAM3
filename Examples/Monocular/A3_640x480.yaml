@@ -1,0 +1,65 @@
+%YAML:1.0
+
+# 纯单目在线建图配置（无任何 IMU 项）
+# 相机内参/畸变来源与 Examples/Monocular-Inertial/A3_640x480.yaml 完全一致（同一台相机同一次标定）
+# 本文件刻意不包含 IMU.* 段：本机加速度激励仅约 0.075 m/s²，加速计无法提供有效信息，
+# 在线与离线都只用单目；纯单目模式下 ORB-SLAM3 也不会去读 IMU.* 字段
+# 注意：相机原始帧是左右镜像，送入 SLAM 前必须翻正；当前替换相机运行 focus_absolute=392，内参暂沿用 192 标定
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Kalibr pinhole-radtan: fu, fv, pu, pv = 827.60989312, 827.85314569, 301.17115107, 208.97859358
+Camera1.fx: 827.60989312
+Camera1.fy: 827.85314569
+Camera1.cx: 301.17115107
+Camera1.cy: 208.97859358
+
+# 不要加 Camera1.k3：Settings.cc 用「有 k1 无 k3」判定 4 参数 radtan
+Camera1.k1: -0.00391764
+Camera1.k2: -0.01460449
+Camera1.p1: -0.00585639
+Camera1.p2: 0.00239326
+
+Camera.width: 640
+Camera.height: 480
+
+# 必须等于实际稳定输入帧率：采集端 20 FPS，本项也是 20
+# 2026-10-16 实测：同一段数据配 30（实际 20）与配 20 的最终子图数不同，所以两者必须一致
+Camera.fps: 20
+
+Camera.RGB: 0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# 2026-10-16 决策：在线用 2000。实测 3000 特征时在线单帧 71~82 ms，超过 20 FPS 的 50 ms 预算，
+# 只取最新帧会丢约 40% 的帧（有效帧率掉到 12~14 FPS）；降到 2000 先把 20 FPS 跑稳
+# 代价：弱纹理区匹配内点数变少、更容易丢跟踪；若某次会话频繁丢失，可临时改回 3000 并配合 --fps 15
+ORBextractor.nFeatures: 2000
+
+ORBextractor.scaleFactor: 1.2
+
+ORBextractor.nLevels: 8
+
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters（在线程序不启用 viewer，保留以保持与官方示例兼容）
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
